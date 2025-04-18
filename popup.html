@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>GitLab MR Status</title>
+    <style>
+        body { font-family: sans-serif; padding: 10px; width: 250px; }
+        label, button { display: block; margin: 8px 0; }
+    </style>
+</head>
+<body>
+<h2>Settings</h2>
+<label>
+    Personal Access Token:
+    <input type="password" id="token" placeholder="Enter token" style="width:100%;" />
+</label>
+<button id="save">Save</button>
+<div id="status" style="margin-top:10px;color:green"></div>
+<script src="popup.js"></script>
+</body>
+</html>
