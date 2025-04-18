@@ -3,91 +3,107 @@
     const host = window.location.hostname;
     if (host === 'gitlab.com' || host.endsWith('.gitlab.com')) return;
 
-    const MR_REGEX = /https:\/\/gitlab\.com\/(.+?)\/-\/merge_requests\/(\d+)/;
-    const processedAttr = 'data-gitlab-mr-processed';
+    const MR_REGEX       = /https:\/\/gitlab\.com\/(.+?)\/-\/merge_requests\/(\d+)/;
+    const processedAttr  = 'data-gitlab-mr-processed';
 
-    // Utility to create the status element
-    function createStatusElement(statusText, threadsCount) {
+    // ——— build the status element ———
+    function createStatusElement(statusText, threadsCount, failedJobs = []) {
         const container = document.createElement('div');
         container.style.fontSize = '0.9em';
-        container.style.color = '#555';
-        container.textContent = `Pipeline: ${statusText} | Unresolved threads: ${threadsCount}`;
+        container.style.color    = '#555';
+
+        let text = `Pipeline: ${statusText}`;
+        if (failedJobs.length) {
+            text += ` | Failed jobs: ${failedJobs.join(', ')}`;
+        }
+        text += ` | Unresolved threads: ${threadsCount}`;
+
+        container.textContent = text;
         return container;
     }
 
-    // Fetch token from storage
-    const getToken = () => new Promise(resolve =>
-        chrome.storage.sync.get('gitlabToken', data => resolve(data.gitlabToken))
-    );
-
-    const token = await getToken();
+    // ——— grab your token ———
+    const getToken = () =>
+        new Promise(resolve =>
+            chrome.storage.sync.get('gitlabToken', data => resolve(data.gitlabToken))
+        );
+    const token   = await getToken();
     const headers = token ? { Authorization: `Bearer ${token}` } : {};
 
-    // Process a single link if not already done
+    // ——— process each MR link ———
     async function processLink(link) {
         if (link.hasAttribute(processedAttr)) return;
         link.setAttribute(processedAttr, 'true');
 
-        const match = link.href.match(MR_REGEX);
-        if (!match) return;
-
-        const [_, projectPath, mrIid] = match;
+        const m = link.href.match(MR_REGEX);
+        if (!m) return;
+        const [, projectPath, mrIid] = m;
         const encodedPath = encodeURIComponent(projectPath);
 
         try {
-            // 1) Fetch MR details to see if it's merged
-            const mrRes = await fetch(
+            // 1) See if it's merged
+            const mrRes  = await fetch(
                 `https://gitlab.com/api/v4/projects/${encodedPath}/merge_requests/${mrIid}`,
                 { headers }
             );
-            const mr = mrRes.ok ? await mrRes.json() : {};
-            const isMerged = mr.state === 'merged';
+            const mr     = mrRes.ok ? await mrRes.json() : {};
+            const merged = mr.state === 'merged';
 
-            let statusText;
-            if (isMerged) {
+            let statusText, failedJobs = [];
+
+            if (merged) {
                 statusText = 'Merged';
             } else {
-                // 2) Only if not merged, fetch latest pipeline
-                const pipelinesRes = await fetch(
+                // 2) Get latest pipeline
+                const pipeRes   = await fetch(
                     `https://gitlab.com/api/v4/projects/${encodedPath}/merge_requests/${mrIid}/pipelines`,
                     { headers }
                 );
-                const pipelines = pipelinesRes.ok ? await pipelinesRes.json() : [];
-                statusText = pipelines[0]?.status || 'unknown';
+                const pipelines = pipeRes.ok ? await pipeRes.json() : [];
+                const latest    = pipelines[0];
+                statusText      = latest?.status || 'unknown';
+
+                // 3) If it failed, list the jobs that failed
+                if (latest && statusText === 'failed') {
+                    const jobsRes = await fetch(
+                        `https://gitlab.com/api/v4/projects/${encodedPath}/pipelines/${latest.id}/jobs`,
+                        { headers }
+                    );
+                    if (jobsRes.ok) {
+                        const jobs = await jobsRes.json();
+                        failedJobs = jobs
+                            .filter(j => j.status === 'failed')
+                            .map(j => j.name);
+                    }
+                }
             }
 
-            // 3) Fetch unresolved thread count as before
-            const discussionsRes = await fetch(
+            // 4) Still pull unresolved threads as before
+            const discRes     = await fetch(
                 `https://gitlab.com/api/v4/projects/${encodedPath}/merge_requests/${mrIid}/discussions`,
                 { headers }
             );
-            const discussions = discussionsRes.ok ? await discussionsRes.json() : [];
-            const unresolved = discussions.filter(d => d.resolvable && !d.resolved).length;
+            const discussions = discRes.ok ? await discRes.json() : [];
+            const unresolved  = discussions.filter(d => d.resolvable && !d.resolved).length;
 
-            // 4) Render
-            const statusEl = createStatusElement(statusText, unresolved);
-            link.after(statusEl);
+            // 5) Render
+            const el = createStatusElement(statusText, unresolved, failedJobs);
+            link.after(el);
 
         } catch (err) {
             console.error('GitLab MR Status error:', err);
         }
     }
 
-    // Initial scan
+    // initial scan + React‑friendly observer
     document.querySelectorAll('a[href*="/-/merge_requests/"]').forEach(processLink);
-
-    // Observe for dynamically added links (e.g., in React apps)
-    const observer = new MutationObserver(mutations => {
-        for (const { addedNodes } of mutations) {
-            addedNodes.forEach(node => {
-                if (node.nodeType !== 1) return;
-                if (node.tagName === 'A') {
-                    processLink(node);
-                } else {
-                    node.querySelectorAll?.('a[href*="/-/merge_requests/"]').forEach(processLink);
-                }
-            });
-        }
-    });
-    observer.observe(document.body, { childList: true, subtree: true });
+    new MutationObserver(muts => {
+        muts.forEach(({ addedNodes }) =>
+            addedNodes.forEach(n => {
+                if (n.nodeType !== 1) return;
+                if (n.tagName === 'A') processLink(n);
+                else n.querySelectorAll?.('a[href*="/-/merge_requests/"]').forEach(processLink);
+            })
+        );
+    }).observe(document.body, { childList: true, subtree: true });
 })();
